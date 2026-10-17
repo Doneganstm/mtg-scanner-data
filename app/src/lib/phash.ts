@@ -71,6 +71,28 @@ export function lumaGrid(
   return out;
 }
 
+/** One luma sample at upright coordinates (ux, uy), clamped to the image; `rot` as in lumaGrid. */
+export function lumaAt(buf: Uint8Array, stride: number, bufW: number, bufH: number, rot: Rotation, ux: number, uy: number): number {
+  'worklet';
+  let bx = Math.floor(ux);
+  let by = Math.floor(uy);
+  if (rot === 'right') {
+    bx = Math.floor(uy);
+    by = bufH - 1 - Math.floor(ux);
+  } else if (rot === 'down') {
+    bx = bufW - 1 - Math.floor(ux);
+    by = bufH - 1 - Math.floor(uy);
+  } else if (rot === 'left') {
+    bx = bufW - 1 - Math.floor(uy);
+    by = Math.floor(ux);
+  }
+  if (bx < 0) bx = 0;
+  else if (bx >= bufW) bx = bufW - 1;
+  if (by < 0) by = 0;
+  else if (by >= bufH) by = bufH - 1;
+  return buf[by * stride + bx];
+}
+
 /** Mean absolute neighbour difference of a grid: a cheap sharpness / "is there a textured card here" score. */
 export function gridDetail(grid: Float32Array): number {
   'worklet';

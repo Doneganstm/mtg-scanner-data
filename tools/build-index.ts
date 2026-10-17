@@ -20,12 +20,15 @@ for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replac
 const LIMIT = args.has('limit') ? Number(args.get('limit')) : Infinity;
 const OUT = path.resolve(args.get('out') ?? 'out');
 const CONCURRENCY = Number(args.get('concurrency') ?? 12);
+const BULK_FILE = args.get('bulk'); // reuse an already-downloaded bulk .jsonl instead of fetching today's
 const CACHE = path.resolve('cache');
 const UA = { 'User-Agent': 'MTGScannerIndexBuilder/1.0', Accept: 'application/json;q=0.9,*/*;q=0.8' };
 
 mkdirSync(OUT, { recursive: true });
 mkdirSync(path.join(CACHE, 'small'), { recursive: true });
 
+// Real, collectible card sets that Scryfall tags as memorabilia: Collectors' Edition and International Collectors' Edition.
+const COLLECTIBLE_MEMORABILIA = new Set(['ced', 'cei']);
 const SKIP_LAYOUTS = new Set(['token', 'double_faced_token', 'emblem', 'art_series', 'vanguard', 'scheme', 'planar', 'augment', 'host']);
 
 interface ScryCard {
@@ -37,6 +40,8 @@ interface ScryCard {
   set: string;
   set_name: string;
   set_type: string;
+  border_color?: string;
+  frame?: string;
   collector_number: string;
   rarity: string;
   released_at: string;
@@ -59,7 +64,7 @@ const norm = (s: string) =>
     .trim();
 
 async function downloadBulk(): Promise<ScryCard[]> {
-  const file = path.join(CACHE, `default_cards_${new Date().toISOString().slice(0, 10)}.jsonl`);
+  const file = BULK_FILE ? path.resolve(BULK_FILE) : path.join(CACHE, `default_cards_${new Date().toISOString().slice(0, 10)}.jsonl`);
   if (!existsSync(file)) {
     const meta = (await (await fetch('https://api.scryfall.com/bulk-data/default_cards', { headers: UA })).json()) as {
       download_uri?: string;
@@ -82,7 +87,7 @@ async function downloadBulk(): Promise<ScryCard[]> {
     if (c.lang !== 'en' || !c.games?.includes('paper')) continue; // drop early to keep memory low
     out.push({
       id: c.id, oracle_id: c.oracle_id, name: c.name, lang: c.lang, layout: c.layout, set: c.set, set_name: c.set_name,
-      set_type: c.set_type, collector_number: c.collector_number, rarity: c.rarity, released_at: c.released_at,
+      set_type: c.set_type, border_color: c.border_color, frame: c.frame, collector_number: c.collector_number, rarity: c.rarity, released_at: c.released_at,
       type_line: c.type_line, mana_cost: c.mana_cost, games: c.games, finishes: c.finishes, illustration_id: c.illustration_id,
       image_uris: c.image_uris ? { small: c.image_uris.small } : undefined,
       card_faces: c.card_faces?.slice(0, 1).map((f) => ({ illustration_id: f.illustration_id, mana_cost: f.mana_cost, image_uris: f.image_uris ? { small: f.image_uris.small } : undefined })),
@@ -90,6 +95,13 @@ async function downloadBulk(): Promise<ScryCard[]> {
     });
   }
   return out;
+}
+
+async function fetchTo(url: string, file: string): Promise<void> {
+  if (existsSync(file)) return;
+  const res = await fetch(url, { headers: UA });
+  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  writeFileSync(file, Buffer.from(await res.arrayBuffer()));
 }
 
 async function pool<T>(items: T[], n: number, fn: (item: T, i: number) => Promise<void>) {
@@ -130,6 +142,36 @@ export async function hashCardImage(jpeg: Buffer) {
   return phashFromGrid(grid);
 }
 
+/**
+ * Early editions re-worded their cards, and Scryfall only stores today's Oracle wording. MTGJSON records each printing's original
+ * text and type line, so we store that for the editions that print no set symbol/code/number; the app uses it to tell them apart.
+ */
+const PRINTED_TEXT_SETS = ['lea', 'leb', '2ed', '3ed', '4ed'];
+async function addPrintedText(db: DatabaseSync) {
+  mkdirSync(path.join(CACHE, 'mtgjson'), { recursive: true });
+  const update = db.prepare('UPDATE cards SET printed_text = ? WHERE id = ?');
+  let n = 0;
+  for (const set of PRINTED_TEXT_SETS) {
+    const file = path.join(CACHE, 'mtgjson', `${set.toUpperCase()}.json`);
+    try {
+      await fetchTo(`https://mtgjson.com/api/v5/${set.toUpperCase()}.json`, file);
+    } catch {
+      console.warn(`  MTGJSON ${set} unavailable; printed wording skipped for it`);
+      continue;
+    }
+    const cards = (JSON.parse(readFileSync(file, 'utf8')) as { data: { cards: { name: string; number: string; originalText?: string; originalType?: string }[] } }).data.cards;
+    const byName = new Map<string, typeof cards>();
+    for (const c of cards) { if (!byName.has(c.name)) byName.set(c.name, []); byName.get(c.name)!.push(c); }
+    const rows = db.prepare('SELECT id, name, collector_number FROM cards WHERE set_code = ?').all(set) as { id: string; name: string; collector_number: string }[];
+    for (const r of rows) {
+      const opts = byName.get(r.name);
+      const m = opts?.find((c) => c.number === r.collector_number) ?? opts?.[0];
+      if (m && (m.originalText || m.originalType)) { update.run(`${m.originalType ?? ''}\n${m.originalText ?? ''}`, r.id); n++; }
+    }
+  }
+  console.log(`Printed wording stored for ${n} early-edition printings`);
+}
+
 async function main() {
   const all = await downloadBulk();
   console.log(`Scryfall objects: ${all.length}`);
@@ -138,7 +180,7 @@ async function main() {
       c.lang === 'en' &&
       c.games?.includes('paper') &&
       !SKIP_LAYOUTS.has(c.layout) &&
-      c.set_type !== 'memorabilia' &&
+      (c.set_type !== 'memorabilia' || COLLECTIBLE_MEMORABILIA.has(c.set)) &&
       c.set_type !== 'token' &&
       (c.image_uris ?? c.card_faces?.[0]?.image_uris),
   );
@@ -153,14 +195,15 @@ async function main() {
       id TEXT PRIMARY KEY, oracle_id TEXT, illustration_id TEXT, name TEXT, name_norm TEXT,
       set_code TEXT, set_name TEXT, collector_number TEXT, rarity TEXT, released_at TEXT,
       type_line TEXT, mana_cost TEXT, image TEXT, finishes TEXT,
-      usd REAL, usd_foil REAL, usd_etched REAL, eur REAL
+      usd REAL, usd_foil REAL, usd_etched REAL, eur REAL,
+      border_color TEXT, frame TEXT, printed_text TEXT
     );
     CREATE TABLE art(illustration_id TEXT PRIMARY KEY, hash BLOB NOT NULL);
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
   `);
 
   const insert = db.prepare(
-    'INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
   );
   const num = (s: string | null | undefined) => (s == null ? null : Number(s));
   const illusImage = new Map<string, string>(); // illustration -> a small-image URL to hash (newest printing wins)
@@ -175,6 +218,7 @@ async function main() {
       c.id, c.oracle_id ?? null, illus, c.name, norm(c.name), c.set, c.set_name, c.collector_number,
       c.rarity, c.released_at, c.type_line ?? null, c.mana_cost ?? face?.mana_cost ?? null, rel,
       (c.finishes ?? []).join(','), num(c.prices.usd), num(c.prices.usd_foil), num(c.prices.usd_etched), num(c.prices.eur),
+      c.border_color ?? null, c.frame ?? null,
     );
   }
   db.exec('COMMIT');
@@ -201,9 +245,11 @@ async function main() {
   });
   if (failed.length) console.warn(`Failed to hash ${failed.length} illustrations`);
 
+  await addPrintedText(db);
+
   const put = db.prepare('INSERT INTO meta VALUES (?, ?)');
   put.run('built_at', new Date().toISOString());
-  put.run('schema', '1');
+  put.run('schema', '3');
   put.run('price_date', new Date().toISOString().slice(0, 10));
   put.run('illustrations', String(done - failed.length));
   put.run('printings', String(cards.length));
