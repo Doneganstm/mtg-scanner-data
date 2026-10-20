@@ -14,7 +14,8 @@ import path from 'node:path';
 import sharp from 'sharp';
 import { artRect, lumaGrid, phashFromGrid } from '../app/src/lib/phash.ts';
 import { WIDE_REF_BYTES, packWideRef, wideRefFromGrid } from '../app/src/lib/wide.ts';
-import { bytesFromWords } from '../app/src/lib/match.ts';
+import { findTwins } from '../app/src/lib/twins.ts';
+import { bytesFromWords, wordsFromBytes } from '../app/src/lib/match.ts';
 
 const args = new Map<string, string>();
 for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replace(/^--/, ''), process.argv[i + 1]);
@@ -91,7 +92,7 @@ async function downloadBulk(): Promise<ScryCard[]> {
       set_type: c.set_type, border_color: c.border_color, frame: c.frame, collector_number: c.collector_number, rarity: c.rarity, released_at: c.released_at,
       type_line: c.type_line, mana_cost: c.mana_cost, games: c.games, finishes: c.finishes, illustration_id: c.illustration_id,
       image_uris: c.image_uris ? { small: c.image_uris.small } : undefined,
-      card_faces: c.card_faces?.slice(0, 1).map((f) => ({ illustration_id: f.illustration_id, mana_cost: f.mana_cost, image_uris: f.image_uris ? { small: f.image_uris.small } : undefined })),
+      card_faces: c.card_faces?.slice(0, 2).map((f) => ({ illustration_id: f.illustration_id, mana_cost: f.mana_cost, image_uris: f.image_uris ? { small: f.image_uris.small } : undefined })),
       prices: c.prices,
     });
   }
@@ -201,15 +202,16 @@ async function main() {
       set_code TEXT, set_name TEXT, collector_number TEXT, rarity TEXT, released_at TEXT,
       type_line TEXT, mana_cost TEXT, image TEXT, finishes TEXT,
       usd REAL, usd_foil REAL, usd_etched REAL, eur REAL,
-      border_color TEXT, frame TEXT, printed_text TEXT
+      border_color TEXT, frame TEXT, printed_text TEXT, back_illustration_id TEXT
     );
     CREATE TABLE art(illustration_id TEXT PRIMARY KEY, hash BLOB NOT NULL);
     CREATE TABLE art_desc(illustration_id TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
+    CREATE TABLE art_twin(a TEXT NOT NULL, b TEXT NOT NULL);
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
   `);
 
   const insert = db.prepare(
-    'INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)',
+    'INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)',
   );
   const num = (s: string | null | undefined) => (s == null ? null : Number(s));
   const illusImage = new Map<string, string>(); // illustration -> a small-image URL to hash (newest printing wins)
@@ -220,16 +222,21 @@ async function main() {
     const rel = /\/small\/(.+?)(\?|$)/.exec(small)?.[1] ?? '';
     const illus = c.illustration_id ?? face?.illustration_id ?? null;
     if (illus && !illusImage.has(illus)) illusImage.set(illus, small);
+    // Double-faced cards (two real faces, each with its own picture): index the back too, so scanning either side works.
+    const back = c.image_uris == null ? c.card_faces?.[1] : undefined;
+    const backIllus = back?.illustration_id && back.image_uris?.small ? back.illustration_id : null;
+    if (backIllus && !illusImage.has(backIllus)) illusImage.set(backIllus, back!.image_uris!.small);
     insert.run(
       c.id, c.oracle_id ?? null, illus, c.name, norm(c.name), c.set, c.set_name, c.collector_number,
       c.rarity, c.released_at, c.type_line ?? null, c.mana_cost ?? face?.mana_cost ?? null, rel,
       (c.finishes ?? []).join(','), num(c.prices.usd), num(c.prices.usd_foil), num(c.prices.usd_etched), num(c.prices.eur),
-      c.border_color ?? null, c.frame ?? null,
+      c.border_color ?? null, c.frame ?? null, backIllus,
     );
   }
   db.exec('COMMIT');
   db.exec(`
     CREATE INDEX idx_cards_illus ON cards(illustration_id);
+    CREATE INDEX idx_cards_back ON cards(back_illustration_id);
     CREATE INDEX idx_cards_name ON cards(name_norm);
     CREATE INDEX idx_cards_set_num ON cards(set_code, collector_number);
     CREATE INDEX idx_cards_oracle ON cards(oracle_id);
@@ -253,6 +260,19 @@ async function main() {
     if (++done % 500 === 0) console.log(`  ${done}/${illus.length}`);
   });
   if (failed.length) console.warn(`Failed to hash ${failed.length} illustrations`);
+
+  // Illustrations that look the same: the scanner groups them instead of guessing between them.
+  {
+    const hashRows = db.prepare('SELECT illustration_id id, hash FROM art ORDER BY illustration_id').all() as { id: string; hash: Uint8Array }[];
+    const w = new Uint32Array(hashRows.length * 8);
+    hashRows.forEach((r, i) => w.set(wordsFromBytes(new Uint8Array(r.hash)), i * 8));
+    const pairs = findTwins(w, hashRows.length);
+    const insTwin = db.prepare('INSERT INTO art_twin VALUES (?, ?)');
+    db.exec('BEGIN');
+    for (const [i, j] of pairs) insTwin.run(hashRows[i].id, hashRows[j].id);
+    db.exec('COMMIT');
+    console.log(`Twin illustrations: ${pairs.length} pairs`);
+  }
 
   await addPrintedText(db);
 

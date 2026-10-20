@@ -17,6 +17,8 @@ export const TILE_CELLS = TILE_N * TILE_N;
 export const SAT_LEVEL = 235;
 /** Tiles within this many tiles of a blown-out tile are ignored too (glare has a halo). */
 export const SAT_DILATE = 2;
+/** The tile streams only run when more than this share of the art window is blown out (tools/wide-ablate.ts: 2 % costs 0.1 point, saves a fifth of the time). */
+export const TILE_MIN_BLOWN = 0.02;
 /** At least this share of tiles must survive masking for the tile score to mean anything. */
 export const MIN_TILE_SHARE = 0.19;
 
@@ -120,7 +122,7 @@ export function buildWideQuery(buf: Uint8Array, stride: number, bufW: number, bu
   for (let i = 0; i < FLAT_SLOTS.length; i++) flat.push(describe(grids[NEIGHBOUR_SLOTS[FLAT_SLOTS[i]]], 'flat'));
   const blownShare = blownShareOf(grids[CENTRE_SLOT]);
   const tiles: TileQuery[] = [];
-  if (blownShare > 0.004) for (let i = 0; i < TILE_SLOTS; i++) tiles.push(tileQuery(grids[NEIGHBOUR_SLOTS[i]]));
+  if (blownShare > TILE_MIN_BLOWN) for (let i = 0; i < TILE_SLOTS; i++) tiles.push(tileQuery(grids[NEIGHBOUR_SLOTS[i]]));
   return { hashes, flat, tiles, blownShare };
 }
 

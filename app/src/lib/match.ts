@@ -6,8 +6,12 @@ export interface SearchResult {
   index: number;
   /** Hamming distance (0-256) of the closest illustration. */
   distance: number;
-  /** Distance of the runner-up (a different illustration). */
+  /** Distance of the runner-up: the closest illustration that is not a twin of the winner (see ArtIndex.setTwins). */
   second: number;
+  /** Rows of illustrations whose artwork is practically the same as the winner's; they cannot be told apart by looking, only by title / set. */
+  twins?: number[];
+  /** The closest few entries (best first) with their distances, for "did you mean ..." suggestions. */
+  top?: { row: number; distance: number }[];
 }
 
 export function wordsFromBytes(bytes: Uint8Array): Uint32Array {
@@ -41,10 +45,37 @@ const SHORTLIST = 3000;
 /** Entries handled per step; each step is a fraction of a millisecond even on a slow phone. */
 const STEP = 600;
 
-interface Exact {
-  best: number;
-  second: number;
-  bestIdx: number;
+/** The few closest entries seen so far; the runner-up that matters is the closest one that is not a twin of the winner. */
+export class Ranker {
+  readonly d = [257, 257, 257, 257];
+  readonly i = [-1, -1, -1, -1];
+
+  push(dist: number, idx: number) {
+    if (dist >= this.d[3]) return;
+    let p = 3;
+    while (p > 0 && this.d[p - 1] > dist) {
+      this.d[p] = this.d[p - 1];
+      this.i[p] = this.i[p - 1];
+      p--;
+    }
+    this.d[p] = dist;
+    this.i[p] = idx;
+  }
+
+  result(index: ArtIndex): SearchResult {
+    const best = this.i[0];
+    const twins = best >= 0 ? index.twinsOf(best) : [];
+    let second = 257;
+    for (let k = 1; k < 4; k++) {
+      if (this.i[k] >= 0 && !twins.includes(this.i[k])) {
+        second = this.d[k];
+        break;
+      }
+    }
+    const top: { row: number; distance: number }[] = [];
+    for (let k = 0; k < 4; k++) if (this.i[k] >= 0) top.push({ row: this.i[k], distance: this.d[k] });
+    return { index: best, distance: this.d[0], second, twins, top };
+  }
 }
 
 export class ArtIndex {
@@ -54,12 +85,31 @@ export class ArtIndex {
   /** Coarse-pass distances; reused between searches. */
   private readonly coarse: Uint8Array;
   private rows: Map<string, number> | null = null;
+  private twins: Map<number, number[]> = new Map();
 
   constructor(ids: string[], words: Uint32Array) {
     this.ids = ids;
     this.words = words;
     this.size = ids.length;
     this.coarse = new Uint8Array(ids.length);
+  }
+
+  /** Pairs of illustration ids whose stored fingerprints are nearly identical (art_twin table). */
+  setTwins(pairs: [string, string][]) {
+    this.twins = new Map();
+    for (const [a, b] of pairs) {
+      const ra = this.rowOf(a);
+      const rb = this.rowOf(b);
+      if (ra < 0 || rb < 0 || ra === rb) continue;
+      if (!this.twins.has(ra)) this.twins.set(ra, []);
+      if (!this.twins.has(rb)) this.twins.set(rb, []);
+      this.twins.get(ra)!.push(rb);
+      this.twins.get(rb)!.push(ra);
+    }
+  }
+
+  twinsOf(row: number): number[] {
+    return this.twins.get(row) ?? [];
   }
 
   /** Row of an illustration in the index, or -1. */
@@ -74,9 +124,9 @@ export class ArtIndex {
   /** Smallest Hamming distance between any of the query fingerprints and the stored one in `row` (257 for a bad row). */
   distanceTo(queries: Uint32Array[], row: number): number {
     if (row < 0 || row >= this.size) return 257;
-    const st: Exact = { best: 257, second: 257, bestIdx: -1 };
+    const st = new Ranker();
     this.exactPass(queries, [row], 0, 1, st);
-    return st.best;
+    return st.d[0];
   }
 
   /**
@@ -90,9 +140,9 @@ export class ArtIndex {
     const limit = this.limitFor(hist);
     const picked: number[] = [];
     this.pick(limit, 0, this.size, picked);
-    const st: Exact = { best: 257, second: 257, bestIdx: -1 };
+    const st = new Ranker();
     this.exactPass(queries, picked, 0, picked.length, st);
-    return { index: st.bestIdx, distance: st.best, second: st.second };
+    return st.result(this);
   }
 
   /**
@@ -118,12 +168,12 @@ export class ArtIndex {
       this.pick(limit, i, Math.min(this.size, i + STEP * 4), picked);
       await breathe();
     }
-    const st: Exact = { best: 257, second: 257, bestIdx: -1 };
+    const st = new Ranker();
     for (let c = 0; c < picked.length; c += STEP / 2) {
       this.exactPass(queries, picked, c, Math.min(picked.length, c + STEP / 2), st);
       await breathe();
     }
-    return { index: st.bestIdx, distance: st.best, second: st.second };
+    return st.result(this);
   }
 
   /** Coarse distance (first 128 bits, centre alignment) for entries [from, to); also tallies a histogram. */
@@ -160,7 +210,7 @@ export class ArtIndex {
   }
 
   /** Exact distance over all 256 bits and every alignment variant, for shortlisted entries [from, to). */
-  private exactPass(queries: Uint32Array[], candidates: number[], from: number, to: number, st: Exact) {
+  private exactPass(queries: Uint32Array[], candidates: number[], from: number, to: number, st: Ranker) {
     const w = this.words;
     for (let c = from; c < to; c++) {
       const i = candidates[c];
@@ -175,13 +225,7 @@ export class ArtIndex {
         }
         if (d < dMin) dMin = d;
       }
-      if (dMin < st.best) {
-        st.second = st.best;
-        st.best = dMin;
-        st.bestIdx = i;
-      } else if (dMin < st.second) {
-        st.second = dMin;
-      }
+      st.push(dMin, i);
     }
   }
 }
