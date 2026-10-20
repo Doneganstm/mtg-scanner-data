@@ -32,7 +32,7 @@ export function mergeStatements(): string[] {
     `INSERT OR REPLACE INTO main.art_desc (illustration_id, data) SELECT illustration_id, data FROM ${SCHEMA}.art_desc`,
     `INSERT OR REPLACE INTO main.art_variant (illustration_id, variant, hash, data) SELECT illustration_id, variant, hash, data FROM ${SCHEMA}.art_variant`,
     `INSERT INTO main.art_twin (a, b) SELECT t.a, t.b FROM ${SCHEMA}.art_twin t WHERE NOT EXISTS (SELECT 1 FROM main.art_twin x WHERE x.a = t.a AND x.b = t.b)`,
-    `INSERT OR REPLACE INTO main.meta (key, value) SELECT key, value FROM ${SCHEMA}.meta`,
+    `INSERT OR REPLACE INTO main.meta (key, value) SELECT key, value FROM ${SCHEMA}.meta WHERE key != 'delta_from_base'`,
   ];
 }
 
