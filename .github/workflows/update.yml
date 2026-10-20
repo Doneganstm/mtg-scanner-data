@@ -1,0 +1,49 @@
+# Keeps the card catalog current. Four times a day it asks Scryfall whether its bulk data changed (new sets, new cards, corrections, prices); only
+# then it rebuilds the catalog, checks that it is healthy, and publishes a release with
+#   cards.db       the full catalog (apps without a matching base download this)
+#   delta.db       only what changed since the base catalog (a few MB; apps on the same base download this)
+#   manifest.json  what is in the release; the app reads this tiny file to decide whether and how to update
+# A broken build publishes nothing, so the previous release stays the latest. The app downloads .../releases/latest/download/manifest.json
+name: Update card catalog
+on:
+  schedule: [{ cron: '15 3,9,15,21 * * *' }]
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if Scryfall data has not changed'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: update-catalog
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - run: npm ci
+        working-directory: tools
+      - name: Has Scryfall changed?
+        id: check
+        working-directory: tools
+        run: node --no-warnings release.ts check --repo "$GITHUB_REPOSITORY" ${{ inputs.force && '--force' || '' }}
+      - uses: actions/cache@v4
+        if: steps.check.outputs.skip != 'true'
+        with:
+          path: tools/cache/small
+          key: card-art-${{ github.run_id }}
+          restore-keys: card-art-
+      - name: Build catalog
+        if: steps.check.outputs.skip != 'true'
+        working-directory: tools
+        run: node --no-warnings build-index.ts --concurrency 16
+      - name: Health checks, delta, release
+        if: steps.check.outputs.skip != 'true'
+        working-directory: tools
+        run: node --no-warnings release.ts publish --repo "$GITHUB_REPOSITORY" --db out/cards.db

@@ -130,10 +130,24 @@ export const SCALE_FACTORS = [0.8, 0.9, 1.12, 1.25];
 const SCALE_X = [-2, 0, 2];
 const SCALE_Y = [-3, 0, 3];
 
-/** Everything tier 1b needs from one frame. */
-export function buildWideQuery(buf: Uint8Array, stride: number, bufW: number, bufH: number, rot: Rotation, card: Rect): WideQuery {
+/**
+ * Everything tier 1b needs from one frame. With `upsideDown` the art window is taken from where it sits on a card held the other way up (the art box
+ * mirrored top to bottom) and every grid is turned by 180 degrees, so an upside-down card is matched as if it were upright.
+ */
+export function buildWideQuery(buf: Uint8Array, stride: number, bufW: number, bufH: number, rot: Rotation, card: Rect, upsideDown = false): WideQuery {
   'worklet';
-  const grids = shiftedGrids(buf, stride, bufW, bufH, rot, card);
+  const src = upsideDown ? { x: card.x, y: card.y + (1 - ART_BOX.y1 - ART_BOX.y0) * card.h, w: card.w, h: card.h } : card;
+  const grids = shiftedGrids(buf, stride, bufW, bufH, rot, src);
+  if (upsideDown) {
+    for (let a = 0; a < grids.length; a++) {
+      const g = grids[a];
+      for (let i = 0, j = g.length - 1; i < j; i++, j--) {
+        const t = g[i];
+        g[i] = g[j];
+        g[j] = t;
+      }
+    }
+  }
   const hashes: Uint32Array[] = [];
   for (let i = 0; i < grids.length; i++) hashes.push(phashFromGrid(grids[i]));
   const flat: Float32Array[] = [];
