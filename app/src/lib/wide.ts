@@ -122,6 +122,14 @@ function blownShareOf(g: Float32Array): number {
   return c / g.length;
 }
 
+/**
+ * Card sizes relative to the guide at which the art window is also sampled when the card was held too close or too far (see buildWideQuery).
+ * Each adds 9 fingerprints (3 x 3 alignments) and one flattened descriptor.
+ */
+export const SCALE_FACTORS = [0.8, 0.9, 1.12, 1.25];
+const SCALE_X = [-2, 0, 2];
+const SCALE_Y = [-3, 0, 3];
+
 /** Everything tier 1b needs from one frame. */
 export function buildWideQuery(buf: Uint8Array, stride: number, bufW: number, bufH: number, rot: Rotation, card: Rect): WideQuery {
   'worklet';
@@ -136,12 +144,30 @@ export function buildWideQuery(buf: Uint8Array, stride: number, bufW: number, bu
   return { hashes, flat, tiles, blownShare };
 }
 
+/**
+ * The card held too close or too far: the art window sampled at the card sizes in SCALE_FACTORS (3 x 3 alignments each, 36 fingerprints, 4 descriptors).
+ * Built on frames the normal wide search could not use, because it costs about as much as the normal wide query again.
+ */
+export function buildScaleQuery(buf: Uint8Array, stride: number, bufW: number, bufH: number, rot: Rotation, card: Rect): WideQuery {
+  'worklet';
+  const hashes: Uint32Array[] = [];
+  const flat: Float32Array[] = [];
+  for (let k = 0; k < SCALE_FACTORS.length; k++) {
+    const s = SCALE_FACTORS[k];
+    const scaled = { x: card.x + (card.w * (1 - s)) / 2, y: card.y + (card.h * (1 - s)) / 2, w: card.w * s, h: card.h * s };
+    const g9 = shiftedGrids(buf, stride, bufW, bufH, rot, scaled, SCALE_X, SCALE_Y);
+    for (let i = 0; i < g9.length; i++) hashes.push(phashFromGrid(g9[i]));
+    flat.push(describe(g9[4], 'flat')); // the centre of the 3 x 3
+  }
+  return { hashes, flat, tiles: [], blownShare: 0 };
+}
+
 // --- crossing the worklet boundary as plain numbers -------------------------------------------------------------------
 
 /** Flattens a WideQuery into a plain number array (worklet -> JS). */
 export function packWide(q: WideQuery): number[] {
   'worklet';
-  const out: number[] = [q.blownShare, q.tiles.length];
+  const out: number[] = [q.blownShare, q.tiles.length, q.hashes.length, q.flat.length];
   for (const h of q.hashes) for (let k = 0; k < HASH_WORDS; k++) out.push(h[k]);
   for (const d of q.flat) for (let k = 0; k < DESC_LEN; k++) out.push(d[k]);
   for (const t of q.tiles) {
@@ -156,14 +182,16 @@ export function unpackWide(a: number[]): WideQuery {
   let p = 0;
   const blownShare = a[p++];
   const nTiles = a[p++];
+  const nHashes = a[p++];
+  const nFlat = a[p++];
   const hashes: Uint32Array[] = [];
-  for (let i = 0; i < ALIGNMENTS; i++) {
+  for (let i = 0; i < nHashes; i++) {
     const h = new Uint32Array(HASH_WORDS);
     for (let k = 0; k < HASH_WORDS; k++) h[k] = a[p++] >>> 0;
     hashes.push(h);
   }
   const flat: Float32Array[] = [];
-  for (let i = 0; i < FLAT_SLOTS.length; i++) {
+  for (let i = 0; i < nFlat; i++) {
     flat.push(Float32Array.from(a.slice(p, p + DESC_LEN)));
     p += DESC_LEN;
   }
