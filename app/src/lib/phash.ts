@@ -191,3 +191,83 @@ export function computeGuide(screenW: number, screenH: number): Rect {
   }
   return { x: (screenW - w) / 2, y: (screenH - h) / 2 - screenH * 0.1, w, h };
 }
+
+/**
+ * Many alignment variants of the art grid for the price of one sampling pass. The art window is sampled once on a half-cell grid
+ * (64x64 plus a margin); every variant is then a 2x2 average of that master grid at a different offset, so 25 shifted grids cost about
+ * as much as 3 ordinary ones. Offsets are in half-cells: one half-cell is 1/64 of the art window (about 1.3% of the card width
+ * horizontally, 0.65% of the card height vertically).
+ */
+export const SHIFT_X = [-4, -2, 0, 2, 4]; // +/- 5.1% of the card width in 2.6% steps
+export const SHIFT_Y = [-6, -3, 0, 3, 6]; // +/- 3.9% of the card height in 2% steps
+
+export function shiftedGrids(
+  buf: Uint8Array,
+  stride: number,
+  bufW: number,
+  bufH: number,
+  rot: Rotation,
+  card: Rect,
+  offsetsX: number[] = SHIFT_X,
+  offsetsY: number[] = SHIFT_Y,
+): Float32Array[] {
+  'worklet';
+  const art = artRect(card, 0, 0);
+  const px = art.w / 64;
+  const py = art.h / 64;
+  const mx = 4; // margin cells each side
+  const my = 6;
+  const MW = 64 + 2 * mx;
+  const MH = 64 + 2 * my;
+  // master grid: each cell the mean of 4 taps
+  const master = new Float32Array(MW * MH);
+  for (let j = 0; j < MH; j++) {
+    for (let i = 0; i < MW; i++) {
+      const x = art.x + (i - mx) * px;
+      const y = art.y + (j - my) * py;
+      let s = 0;
+      for (let ty = 0; ty < 2; ty++) {
+        for (let tx = 0; tx < 2; tx++) {
+          const ux = Math.floor(x + (tx + 0.5) * 0.5 * px);
+          const uy = Math.floor(y + (ty + 0.5) * 0.5 * py);
+          let bx = ux;
+          let by = uy;
+          if (rot === 'right') {
+            bx = uy;
+            by = bufH - 1 - ux;
+          } else if (rot === 'down') {
+            bx = bufW - 1 - ux;
+            by = bufH - 1 - uy;
+          } else if (rot === 'left') {
+            bx = bufW - 1 - uy;
+            by = ux;
+          }
+          if (bx < 0) bx = 0;
+          else if (bx >= bufW) bx = bufW - 1;
+          if (by < 0) by = 0;
+          else if (by >= bufH) by = bufH - 1;
+          s += buf[by * stride + bx];
+        }
+      }
+      master[j * MW + i] = s / 4;
+    }
+  }
+  const out: Float32Array[] = [];
+  for (let a = 0; a < offsetsX.length; a++) {
+    for (let b = 0; b < offsetsY.length; b++) {
+      const ox = mx + offsetsX[a];
+      const oy = my + offsetsY[b];
+      const g = new Float32Array(GRID * GRID);
+      for (let y = 0; y < GRID; y++) {
+        const r0 = (oy + 2 * y) * MW;
+        const r1 = r0 + MW;
+        for (let x = 0; x < GRID; x++) {
+          const c = ox + 2 * x;
+          g[y * GRID + x] = (master[r0 + c] + master[r0 + c + 1] + master[r1 + c] + master[r1 + c + 1]) / 4;
+        }
+      }
+      out.push(g);
+    }
+  }
+  return out;
+}

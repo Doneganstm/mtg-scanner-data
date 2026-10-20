@@ -13,6 +13,7 @@ import { createInterface } from 'node:readline';
 import path from 'node:path';
 import sharp from 'sharp';
 import { artRect, lumaGrid, phashFromGrid } from '../app/src/lib/phash.ts';
+import { WIDE_REF_BYTES, packWideRef, wideRefFromGrid } from '../app/src/lib/wide.ts';
 import { bytesFromWords } from '../app/src/lib/match.ts';
 
 const args = new Map<string, string>();
@@ -135,11 +136,15 @@ async function fetchImage(url: string, cacheFile: string): Promise<Buffer> {
 }
 
 /** Hash exactly the way the phone does: whole card is the "frame", art window sampled from luma. */
-export async function hashCardImage(jpeg: Buffer) {
+export async function analyseCardImage(jpeg: Buffer) {
   const { data, info } = await sharp(jpeg).greyscale().raw().toBuffer({ resolveWithObject: true });
   const card = { x: 0, y: 0, w: info.width, h: info.height };
   const grid = lumaGrid(new Uint8Array(data.buffer, data.byteOffset, data.length), info.width, info.width, info.height, 'up', artRect(card, 0, 0));
-  return phashFromGrid(grid);
+  return { hash: phashFromGrid(grid), wide: packWideRef(wideRefFromGrid(grid)) };
+}
+
+export async function hashCardImage(jpeg: Buffer) {
+  return (await analyseCardImage(jpeg)).hash;
 }
 
 /**
@@ -199,6 +204,7 @@ async function main() {
       border_color TEXT, frame TEXT, printed_text TEXT
     );
     CREATE TABLE art(illustration_id TEXT PRIMARY KEY, hash BLOB NOT NULL);
+    CREATE TABLE art_desc(illustration_id TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
   `);
 
@@ -232,12 +238,15 @@ async function main() {
   const illus = [...illusImage.entries()].slice(0, LIMIT);
   console.log(`Hashing ${illus.length} unique illustrations (${CONCURRENCY} parallel)...`);
   const insArt = db.prepare('INSERT INTO art VALUES (?, ?)');
+  const insDesc = db.prepare('INSERT INTO art_desc VALUES (?, ?)');
   let done = 0;
   const failed: string[] = [];
   await pool(illus, CONCURRENCY, async ([id, url], i) => {
     try {
       const buf = await fetchImage(url, path.join(CACHE, 'small', `${id}.jpg`));
-      insArt.run(id, bytesFromWords(await hashCardImage(buf)));
+      const a = await analyseCardImage(buf);
+      insArt.run(id, bytesFromWords(a.hash));
+      insDesc.run(id, a.wide);
     } catch (e) {
       failed.push(id);
     }
@@ -249,7 +258,8 @@ async function main() {
 
   const put = db.prepare('INSERT INTO meta VALUES (?, ?)');
   put.run('built_at', new Date().toISOString());
-  put.run('schema', '3');
+  put.run('schema', '4');
+  put.run('wide_ref_bytes', String(WIDE_REF_BYTES));
   put.run('price_date', new Date().toISOString().slice(0, 10));
   put.run('illustrations', String(done - failed.length));
   put.run('printings', String(cards.length));

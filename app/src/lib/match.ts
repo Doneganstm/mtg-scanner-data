@@ -53,12 +53,30 @@ export class ArtIndex {
   readonly words: Uint32Array;
   /** Coarse-pass distances; reused between searches. */
   private readonly coarse: Uint8Array;
+  private rows: Map<string, number> | null = null;
 
   constructor(ids: string[], words: Uint32Array) {
     this.ids = ids;
     this.words = words;
     this.size = ids.length;
     this.coarse = new Uint8Array(ids.length);
+  }
+
+  /** Row of an illustration in the index, or -1. */
+  rowOf(illustrationId: string): number {
+    if (!this.rows) {
+      this.rows = new Map();
+      for (let i = 0; i < this.size; i++) this.rows.set(this.ids[i], i);
+    }
+    return this.rows.get(illustrationId) ?? -1;
+  }
+
+  /** Smallest Hamming distance between any of the query fingerprints and the stored one in `row` (257 for a bad row). */
+  distanceTo(queries: Uint32Array[], row: number): number {
+    if (row < 0 || row >= this.size) return 257;
+    const st: Exact = { best: 257, second: 257, bestIdx: -1 };
+    this.exactPass(queries, [row], 0, 1, st);
+    return st.best;
   }
 
   /**
