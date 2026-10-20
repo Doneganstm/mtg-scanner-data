@@ -45,14 +45,19 @@ const SHORTLIST = 3000;
 /** Entries handled per step; each step is a fraction of a millisecond even on a slow phone. */
 const STEP = 600;
 
-/** The few closest entries seen so far; the runner-up that matters is the closest one that is not a twin of the winner. */
+/** Closest entries kept. Several can be the same card as the winner (reprints with near-identical art), so keep more than two. */
+const KEEP = 8;
+/** A same-card neighbour counts as part of the winner's group when it is at most this many bits further away. */
+const GROUP_SLACK = 40;
+
+/** The few closest entries seen so far; the runner-up that matters is the closest one that is not the same picture / same card as the winner. */
 export class Ranker {
-  readonly d = [257, 257, 257, 257];
-  readonly i = [-1, -1, -1, -1];
+  readonly d: number[] = new Array(KEEP).fill(257);
+  readonly i: number[] = new Array(KEEP).fill(-1);
 
   push(dist: number, idx: number) {
-    if (dist >= this.d[3]) return;
-    let p = 3;
+    if (dist >= this.d[KEEP - 1]) return;
+    let p = KEEP - 1;
     while (p > 0 && this.d[p - 1] > dist) {
       this.d[p] = this.d[p - 1];
       this.i[p] = this.i[p - 1];
@@ -64,17 +69,22 @@ export class Ranker {
 
   result(index: ArtIndex): SearchResult {
     const best = this.i[0];
-    const twins = best >= 0 ? index.twinsOf(best) : [];
+    const tableTwins = best >= 0 ? index.twinsOf(best) : [];
+    const group = new Set<number>(tableTwins);
+    // Same card, different illustration id (a reprint whose art is nearly the same): the card is certain, only the printing is not.
+    for (let k = 1; k < KEEP; k++) if (this.i[k] >= 0 && this.d[k] <= this.d[0] + GROUP_SLACK && index.sameCard(best, this.i[k])) group.add(this.i[k]);
     let second = 257;
-    for (let k = 1; k < 4; k++) {
-      if (this.i[k] >= 0 && !twins.includes(this.i[k])) {
+    for (let k = 1; k < KEEP; k++) {
+      if (this.i[k] >= 0 && !group.has(this.i[k]) && !index.sameCard(best, this.i[k])) {
         second = this.d[k];
         break;
       }
     }
+    // every kept entry was the same card: anything unseen is at least as far as the last one kept
+    if (second === 257 && this.i[KEEP - 1] >= 0) second = this.d[KEEP - 1];
     const top: { row: number; distance: number }[] = [];
     for (let k = 0; k < 4; k++) if (this.i[k] >= 0) top.push({ row: this.i[k], distance: this.d[k] });
-    return { index: best, distance: this.d[0], second, twins, top };
+    return { index: best, distance: this.d[0], second, twins: [...group], top };
   }
 }
 
@@ -84,8 +94,9 @@ export class ArtIndex {
   readonly words: Uint32Array;
   /** Coarse-pass distances; reused between searches. */
   private readonly coarse: Uint8Array;
-  private rows: Map<string, number> | null = null;
+  private rows: Map<string, number[]> | null = null;
   private twins: Map<number, number[]> = new Map();
+  private oracleOfRow: Int32Array | null = null;
 
   constructor(ids: string[], words: Uint32Array) {
     this.ids = ids;
@@ -98,27 +109,63 @@ export class ArtIndex {
   setTwins(pairs: [string, string][]) {
     this.twins = new Map();
     for (const [a, b] of pairs) {
-      const ra = this.rowOf(a);
-      const rb = this.rowOf(b);
-      if (ra < 0 || rb < 0 || ra === rb) continue;
-      if (!this.twins.has(ra)) this.twins.set(ra, []);
-      if (!this.twins.has(rb)) this.twins.set(rb, []);
-      this.twins.get(ra)!.push(rb);
-      this.twins.get(rb)!.push(ra);
+      // an illustration can have several rows (one per frame / border variant); every one of them is a twin of every row of the other
+      for (const ra of this.rowsOf(a)) {
+        for (const rb of this.rowsOf(b)) {
+          if (ra === rb) continue;
+          if (!this.twins.has(ra)) this.twins.set(ra, []);
+          if (!this.twins.has(rb)) this.twins.set(rb, []);
+          this.twins.get(ra)!.push(rb);
+          this.twins.get(rb)!.push(ra);
+        }
+      }
     }
+  }
+
+  /** Which card (Oracle id) each illustration belongs to, so near-identical art of the same card is not treated as a rival. */
+  setOracles(pairs: [string, string | null][]) {
+    const codes = new Map<string, number>();
+    const rows = new Int32Array(this.size).fill(-1);
+    for (const [id, oracle] of pairs) {
+      if (!oracle) continue;
+      let c = codes.get(oracle);
+      if (c === undefined) {
+        c = codes.size;
+        codes.set(oracle, c);
+      }
+      for (const r of this.rowsOf(id)) if (rows[r] < 0) rows[r] = c;
+    }
+    this.oracleOfRow = rows;
+  }
+
+  /** True when both rows are pictures of the same card: two variants of one illustration, or illustrations of one Oracle card. */
+  sameCard(a: number, b: number): boolean {
+    if (a < 0 || b < 0) return false;
+    if (this.ids[a] === this.ids[b]) return true;
+    const o = this.oracleOfRow;
+    return !!o && o[a] >= 0 && o[a] === o[b];
   }
 
   twinsOf(row: number): number[] {
     return this.twins.get(row) ?? [];
   }
 
-  /** Row of an illustration in the index, or -1. */
-  rowOf(illustrationId: string): number {
+  /** Rows of an illustration (normally one; more when its frame / border variants are indexed separately). */
+  rowsOf(illustrationId: string): number[] {
     if (!this.rows) {
       this.rows = new Map();
-      for (let i = 0; i < this.size; i++) this.rows.set(this.ids[i], i);
+      for (let i = 0; i < this.size; i++) {
+        const list = this.rows.get(this.ids[i]);
+        if (list) list.push(i);
+        else this.rows.set(this.ids[i], [i]);
+      }
     }
-    return this.rows.get(illustrationId) ?? -1;
+    return this.rows.get(illustrationId) ?? [];
+  }
+
+  /** First row of an illustration in the index, or -1. */
+  rowOf(illustrationId: string): number {
+    return this.rowsOf(illustrationId)[0] ?? -1;
   }
 
   /** Smallest Hamming distance between any of the query fingerprints and the stored one in `row` (257 for a bad row). */

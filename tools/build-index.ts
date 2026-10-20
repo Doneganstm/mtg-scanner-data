@@ -207,6 +207,7 @@ async function main() {
     CREATE TABLE art(illustration_id TEXT PRIMARY KEY, hash BLOB NOT NULL);
     CREATE TABLE art_desc(illustration_id TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
     CREATE TABLE art_twin(a TEXT NOT NULL, b TEXT NOT NULL);
+    CREATE TABLE art_variant(illustration_id TEXT NOT NULL, variant TEXT NOT NULL, hash BLOB NOT NULL, data BLOB NOT NULL, PRIMARY KEY (illustration_id, variant)) WITHOUT ROWID;
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
   `);
 
@@ -215,6 +216,9 @@ async function main() {
   );
   const num = (s: string | null | undefined) => (s == null ? null : Number(s));
   const illusImage = new Map<string, string>(); // illustration -> a small-image URL to hash (newest printing wins)
+  // The same artwork is cropped differently in other frames / borderless versions, so each such variant gets its own fingerprint row.
+  const illusBaseKey = new Map<string, string>();
+  const illusVariants = new Map<string, Map<string, string>>(); // illustration -> variant key -> small-image URL (newest printing in the variant)
   db.exec('BEGIN');
   for (const c of cards.sort((a, b) => (a.released_at < b.released_at ? 1 : -1))) {
     const face = c.card_faces?.[0];
@@ -222,6 +226,14 @@ async function main() {
     const rel = /\/small\/(.+?)(\?|$)/.exec(small)?.[1] ?? '';
     const illus = c.illustration_id ?? face?.illustration_id ?? null;
     if (illus && !illusImage.has(illus)) illusImage.set(illus, small);
+    if (illus) {
+      const key = `${c.frame ?? ''}|${c.border_color ?? ''}`;
+      const baseKey = illusBaseKey.get(illus) ?? (illusBaseKey.set(illus, key), key);
+      if (key !== baseKey) {
+        const m = illusVariants.get(illus) ?? illusVariants.set(illus, new Map()).get(illus)!;
+        if (!m.has(key)) m.set(key, small);
+      }
+    }
     // Double-faced cards (two real faces, each with its own picture): index the back too, so scanning either side works.
     const back = c.image_uris == null ? c.card_faces?.[1] : undefined;
     const backIllus = back?.illustration_id && back.image_uris?.small ? back.illustration_id : null;
@@ -261,6 +273,29 @@ async function main() {
   });
   if (failed.length) console.warn(`Failed to hash ${failed.length} illustrations`);
 
+  // frame / border variants of the artwork
+  {
+    const ok = new Set(illus.map(([id]) => id).filter((id) => !failed.includes(id)));
+    const jobs: { id: string; key: string; url: string }[] = [];
+    for (const [id, m] of illusVariants) if (ok.has(id)) for (const [key, url] of m) jobs.push({ id, key, url });
+    console.log(`Hashing ${jobs.length} frame/border variants...`);
+    const insVar = db.prepare('INSERT INTO art_variant VALUES (?, ?, ?, ?)');
+    let vdone = 0;
+    let vfailed = 0;
+    await pool(jobs, CONCURRENCY, async (j) => {
+      try {
+        const slug = j.key.replace(/[^a-z0-9]+/gi, '_');
+        const buf = await fetchImage(j.url, path.join(CACHE, 'small', `${j.id}~${slug}.jpg`));
+        const a = await analyseCardImage(buf);
+        insVar.run(j.id, j.key, bytesFromWords(a.hash), a.wide);
+      } catch {
+        vfailed++;
+      }
+      if (++vdone % 1000 === 0) console.log(`  ${vdone}/${jobs.length}`);
+    });
+    if (vfailed) console.warn(`Failed to hash ${vfailed} variants`);
+  }
+
   // Illustrations that look the same: the scanner groups them instead of guessing between them.
   {
     const hashRows = db.prepare('SELECT illustration_id id, hash FROM art ORDER BY illustration_id').all() as { id: string; hash: Uint8Array }[];
@@ -279,6 +314,7 @@ async function main() {
   const put = db.prepare('INSERT INTO meta VALUES (?, ?)');
   put.run('built_at', new Date().toISOString());
   put.run('schema', '4');
+  put.run('variants', String((db.prepare('SELECT COUNT(*) n FROM art_variant').get() as { n: number }).n));
   put.run('wide_ref_bytes', String(WIDE_REF_BYTES));
   put.run('price_date', new Date().toISOString().slice(0, 10));
   put.run('illustrations', String(done - failed.length));
