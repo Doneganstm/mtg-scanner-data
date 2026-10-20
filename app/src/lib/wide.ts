@@ -8,7 +8,7 @@
 // buildWideQuery runs on the camera thread (it only reads pixels and does arithmetic); the matching side lives in wideIndex.ts.
 // Pure and shared with the Node tools, so the simulations measure exactly the code the phone runs.
 import { describe, descriptorLength } from './descriptor.ts';
-import { HASH_WORDS, SHIFT_X, SHIFT_Y, phashFromGrid, shiftedGrids, type Rect, type Rotation } from './phash.ts';
+import { ART_BOX, HASH_WORDS, SHIFT_X, SHIFT_Y, phashFromGrid, shiftedGrids, type Rect, type Rotation } from './phash.ts';
 
 export const DESC_LEN = descriptorLength(8); // 63
 export const TILE_N = 16;
@@ -45,6 +45,16 @@ export const FLAT_SLOTS = [0, 5, 6, 7, 8];
 export const TILE_SLOTS = 5;
 export const CENTRE_SLOT = NEIGHBOUR_SLOTS[0];
 export const ALIGNMENTS = SHIFT_X.length * SHIFT_Y.length;
+
+/**
+ * Where the art window sat for alignment `a` (an index into the 25 shifted grids), as the (dx, dy) fractions of card size that phash.artRect
+ * takes. One half-cell of the 64-cell art window is 0.82/64 of the card width and 0.415/64 of its height (ART_BOX).
+ */
+export function alignmentOffset(a: number): [number, number] {
+  const ix = Math.floor(a / SHIFT_Y.length);
+  const iy = a % SHIFT_Y.length;
+  return [(SHIFT_X[ix] * (ART_BOX.x1 - ART_BOX.x0)) / 64, (SHIFT_Y[iy] * (ART_BOX.y1 - ART_BOX.y0)) / 64];
+}
 
 export interface TileQuery {
   /** tile means, 0-255 */

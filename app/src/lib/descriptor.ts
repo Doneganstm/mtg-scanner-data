@@ -52,7 +52,10 @@ export function flatten(g: Float32Array): Float32Array {
 export type DescriptorKind = 'winsor' | 'flat';
 
 /** Number of values in a descriptor restricted to coefficients with u, v < dim (DC excluded). */
-export const descriptorLength = (dim: number) => dim * dim - 1;
+export const descriptorLength = (dim: number) => {
+  'worklet';
+  return dim * dim - 1;
+};
 
 /** Unit-length vector of the lowest dim x dim DCT coefficients (minus DC) of the preprocessed grid. */
 export function describe(grid: Float32Array, kind: DescriptorKind, dim = B): Float32Array {
