@@ -58,8 +58,10 @@ export const descriptorLength = (dim: number) => {
 };
 
 /** Unit-length vector of the lowest dim x dim DCT coefficients (minus DC) of the preprocessed grid. */
-export function describe(grid: Float32Array, kind: DescriptorKind, dim = B): Float32Array {
+export function describe(grid: Float32Array, kind: DescriptorKind, dimArg?: number): Float32Array {
   'worklet';
+  // (not a default parameter: a worklet's default values cannot see the constants it captures)
+  const dim = dimArg ?? B;
   const COS = new Float32Array(dim * GRID);
   for (let u = 0; u < dim; u++) for (let x = 0; x < GRID; x++) COS[u * GRID + x] = Math.cos(((2 * x + 1) * u * Math.PI) / (2 * GRID));
   const g = kind === 'winsor' ? winsorize(grid) : flatten(grid);

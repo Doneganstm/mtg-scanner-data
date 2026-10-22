@@ -208,10 +208,13 @@ export function shiftedGrids(
   bufH: number,
   rot: Rotation,
   card: Rect,
-  offsetsX: number[] = SHIFT_X,
-  offsetsY: number[] = SHIFT_Y,
+  offsetsXArg?: number[],
+  offsetsYArg?: number[],
 ): Float32Array[] {
   'worklet';
+  // (not default parameters: a worklet's default values cannot see the constants it captures)
+  const offsetsX = offsetsXArg ?? SHIFT_X;
+  const offsetsY = offsetsYArg ?? SHIFT_Y;
   const art = artRect(card, 0, 0);
   const px = art.w / 64;
   const py = art.h / 64;
