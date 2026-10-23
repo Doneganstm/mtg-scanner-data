@@ -1,0 +1,12 @@
+{
+  "name": "mtg-scanner-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build-index": "node build-index.ts",
+    "eval": "node eval.ts"
+  },
+  "dependencies": {
+    "sharp": "^0.34.0"
+  }
+}
