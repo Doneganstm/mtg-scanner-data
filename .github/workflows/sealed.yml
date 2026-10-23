@@ -1,0 +1,36 @@
+# Keeps the sealed-product prices current. TCGCSV (a daily copy of TCGplayer's catalogue and prices) refreshes about 20:00 UTC; this reads it and publishes
+#   sealed-meta.json      what the other files are (the app reads this tiny file first)
+#   sealed-products.json  the sealed product list (changes only when TCGplayer lists something new)
+#   sealed-prices.json    today's market / low / mid price per product
+#   sealed-history.json   about 90 days of prices, for the chart on a product's page
+# to the release tagged "sealed" (pre-release, never "latest": the card database is fetched from releases/latest). It reads about 900 small files
+# from TCGCSV, one every 150 ms, once a day, which is within what TCGCSV asks for. A feed that looks broken publishes nothing and fails the run.
+name: Update sealed prices
+on:
+  schedule:
+    - cron: '35 20 * * *'
+    # TCGCSV is sometimes late; this second run does nothing when the first one already caught the day's refresh
+    - cron: '35 22 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if TCGCSV has not refreshed since the last build'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency: update-sealed
+jobs:
+  sealed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build and publish the sealed feed
+        working-directory: tools
+        run: node --no-warnings sealed.ts build --out out/sealed --repo "$GITHUB_REPOSITORY" --publish ${{ inputs.force && '--force' || '' }}

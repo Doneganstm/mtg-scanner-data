@@ -1,0 +1,35 @@
+# Keeps the decklists of sealed decks (Commander, Planeswalker, Challenger and similar decks) current, so that scanning a deck's barcode in the app leads to its
+# cards. Weekly, because new decks arrive with new sets. It streams MTGJSON's two bulk archives (AllSetFiles about 180 MB, AllDeckFiles about 260 MB, one request
+# each) through tar, keeps only the decks that map to a TCGplayer product, and adds
+#   sealed-decks.json   the decklists, keyed by TCGplayer product id (about 1.5 MB)
+# to the release tagged "sealed", with the decks entry in sealed-meta.json updated (the daily "Update sealed prices" job carries that entry over).
+# It stops early when MTGJSON's deck list is unchanged since the last build (and under four weeks old). The sealed prices job must have run once first:
+# this job adds to its meta file.
+name: Update sealed decklists
+on:
+  schedule:
+    - cron: '40 23 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Rebuild even if MTGJSON deck list has not changed'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+# shared with "Update sealed prices": both rewrite sealed-meta.json, so they must not run at the same time
+concurrency: update-sealed
+jobs:
+  decks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Build and publish the decklists
+        working-directory: tools
+        run: node --no-warnings sealed-decks.ts build --out out/sealed --repo "$GITHUB_REPOSITORY" --publish ${{ inputs.force && '--force' || '' }}
